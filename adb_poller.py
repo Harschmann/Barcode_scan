@@ -15,6 +15,7 @@ the operator plugs in, works, unplugs. We report status instead of raising.
 
 import os
 import subprocess
+import threading
 import time
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -23,21 +24,32 @@ from PyQt5.QtCore import QThread, pyqtSignal
 class AdbPoller(QThread):
     new_image = pyqtSignal(str)     # local path to the freshly pulled image
     status_changed = pyqtSignal(str)  # human-readable connection/status text
+    capture_started = pyqtSignal()    # UI capture trigger sequence has begun
+    capture_finished = pyqtSignal()   # ...and it's done (success or fail - see status)
 
     def __init__(self, adb_path, phone_dir, scratch_dir, poll_interval_ms,
-                 delete_after_pull, parent=None):
+                 delete_after_pull, camera_open_delay_s=1.5, parent=None):
         super().__init__(parent)
         self.adb_path = adb_path
         self.phone_dir = phone_dir
         self.scratch_dir = scratch_dir
         self.poll_interval = max(poll_interval_ms, 100) / 1000.0
         self.delete_after_pull = delete_after_pull
+        self.camera_open_delay = camera_open_delay_s
         self._running = True
         self._last_seen = None
         self._last_status = None
+        self._capture_requested = threading.Event()
 
     def stop(self):
         self._running = False
+
+    def request_capture(self):
+        """Thread-safe - call from the UI thread. Tells the poller to trigger
+        the phone's shutter on its next loop iteration; the resulting photo
+        then flows through the exact same pull/detect/save path as a photo
+        the operator took by hand."""
+        self._capture_requested.set()
 
     def run(self):
         os.makedirs(self.scratch_dir, exist_ok=True)
@@ -48,6 +60,14 @@ class AdbPoller(QThread):
                     time.sleep(1.0)
                     continue
                 self._emit_status("Connected - watching for new photo")
+
+                if self._capture_requested.is_set():
+                    self._capture_requested.clear()
+                    self.capture_started.emit()
+                    try:
+                        self._trigger_phone_capture()
+                    finally:
+                        self.capture_finished.emit()
 
                 newest = self._get_newest_filename()
                 if newest and newest != self._last_seen:
@@ -75,6 +95,16 @@ class AdbPoller(QThread):
     def _device_connected(self):
         out = self._run(["get-state"], timeout=3)
         return out.returncode == 0 and out.stdout.strip() == "device"
+
+    def _trigger_phone_capture(self):
+        # Bring the stock camera app to the foreground in still-photo mode,
+        # give it a moment to actually be ready, then send the hardware
+        # shutter keypress (KEYCODE_CAMERA). Re-issuing the "open camera"
+        # intent every time (rather than only once) means this recovers
+        # cleanly even if the app was left on a post-capture review screen.
+        self._run(["shell", "am", "start", "-a", "android.media.action.STILL_IMAGE_CAMERA"], timeout=4)
+        time.sleep(self.camera_open_delay)
+        self._run(["shell", "input", "keyevent", "27"], timeout=3)
 
     def _get_newest_filename(self):
         out = self._run(["shell", f"ls -t {self.phone_dir}"], timeout=3)
