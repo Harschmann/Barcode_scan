@@ -35,6 +35,66 @@ def cv_to_qpixmap(img_bgr):
     return QPixmap.fromImage(qimg.copy())  # copy() so it survives the numpy buffer being reused
 
 
+DARK_THEME_QSS = """
+QMainWindow, QWidget {
+    background-color: #14171a;
+    color: #e6e8ea;
+    font-size: 13px;
+}
+QGroupBox {
+    background-color: #1a1e21;
+    border: 1px solid #2a2f33;
+    border-radius: 8px;
+    margin-top: 16px;
+    padding: 10px 8px 8px 8px;
+    font-weight: 600;
+    color: #8a9199;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    color: #22c55e;
+}
+QPushButton {
+    background-color: #22272b;
+    color: #dfe3e6;
+    border: 1px solid #33393e;
+    border-radius: 6px;
+    padding: 6px 14px;
+}
+QPushButton:hover { background-color: #283430; border: 1px solid #22c55e; }
+QPushButton:pressed { background-color: #1b2320; }
+QPushButton:disabled { color: #565c62; border-color: #262a2d; background-color: #1a1d1f; }
+QPushButton#primaryButton {
+    background-color: #22c55e;
+    color: #0e1210;
+    border: none;
+    font-weight: 700;
+    padding: 7px 18px;
+}
+QPushButton#primaryButton:hover { background-color: #2fd66c; }
+QPushButton#primaryButton:pressed { background-color: #1ea952; }
+QPushButton#primaryButton:disabled { background-color: #2a3430; color: #5c655f; }
+QRadioButton { color: #cfd4d8; spacing: 6px; }
+QRadioButton::indicator {
+    width: 14px; height: 14px; border-radius: 8px;
+    border: 2px solid #3a4045; background: #1a1e21;
+}
+QRadioButton::indicator:checked { border: 2px solid #22c55e; background: #22c55e; }
+QStatusBar { background-color: #101315; color: #8a9199; border-top: 1px solid #2a2f33; }
+QGraphicsView { background-color: #1a1e21; border: 1px solid #2a2f33; border-radius: 6px; }
+QScrollBar:vertical, QScrollBar:horizontal { background: #1a1e21; border: none; }
+QScrollBar:vertical { width: 11px; margin: 2px; }
+QScrollBar:horizontal { height: 11px; margin: 2px; }
+QScrollBar::handle { background: #383f44; border-radius: 5px; min-height: 24px; min-width: 24px; }
+QScrollBar::handle:hover { background: #22c55e; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; border: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+"""
+
+
 class ZoomPanView(QGraphicsView):
     """
     Reusable image viewer.
@@ -59,7 +119,7 @@ class ZoomPanView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.setBackgroundBrush(QColor(32, 32, 32))
+        self.setBackgroundBrush(QColor(26, 30, 33))
         self.setMinimumSize(360, 280)
 
     # ---- content ----
@@ -172,10 +232,13 @@ class MainWindow(QMainWindow):
         # saved banner - big, hidden until a save happens
         self.saved_label = QLabel("")
         f = QFont()
-        f.setPointSize(20)
+        f.setPointSize(15)
         f.setBold(True)
         self.saved_label.setFont(f)
-        self.saved_label.setStyleSheet("color: #17c93f; padding: 6px;")
+        self.saved_label.setStyleSheet(
+            "color: #22c55e; background-color: rgba(34, 197, 94, 35);"
+            "border: 1px solid #22c55e; border-radius: 8px; padding: 8px;"
+        )
         self.saved_label.setAlignment(Qt.AlignCenter)
         self.saved_label.setVisible(False)
         outer.addWidget(self.saved_label)
@@ -196,7 +259,13 @@ class MainWindow(QMainWindow):
         mode_box.setLayout(mode_layout)
         controls.addWidget(mode_box)
 
+        self.capture_btn = QPushButton("Capture")
+        self.capture_btn.setObjectName("primaryButton")
+        self.capture_btn.clicked.connect(self.on_capture_clicked)
+        controls.addWidget(self.capture_btn)
+
         self.detect_btn = QPushButton("Detect")
+        self.detect_btn.setObjectName("primaryButton")
         self.detect_btn.clicked.connect(self.run_detect)
         controls.addWidget(self.detect_btn)
         controls.addStretch(1)
@@ -221,9 +290,11 @@ class MainWindow(QMainWindow):
         self.poller = AdbPoller(
             cfg.ADB_PATH, cfg.PHONE_CAPTURE_DIR, cfg.SCRATCH_DIR,
             cfg.POLL_INTERVAL_MS, cfg.DELETE_FROM_PHONE_AFTER_PULL,
+            camera_open_delay_s=cfg.CAMERA_OPEN_DELAY_S,
         )
         self.poller.new_image.connect(self.on_new_image)
         self.poller.status_changed.connect(self.on_status_changed)
+        self.poller.capture_finished.connect(lambda: self.capture_btn.setEnabled(True))
         self.poller.start()
 
     def closeEvent(self, event):
@@ -240,6 +311,11 @@ class MainWindow(QMainWindow):
 
     def on_status_changed(self, text):
         self.statusBar().showMessage(text)
+
+    def on_capture_clicked(self):
+        self.capture_btn.setEnabled(False)  # re-enabled by poller.capture_finished
+        self.statusBar().showMessage("Triggering phone capture...")
+        self.poller.request_capture()
 
     def on_new_image(self, path):
         img = cv2.imread(path)
@@ -304,6 +380,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_THEME_QSS)
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
